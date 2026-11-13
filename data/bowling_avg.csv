@@ -1,0 +1,7 @@
+import os
+import pandas as pd
+
+# main.py가 있는 위치를 기준으로 data/bowling_avg.csv 경로 찾기
+base_dir = os.path.dirname(os.path.abspath(__file__))
+csv_path = os.path.join(base_dir, 'data', 'bowling_avg.csv')
+df = pd.read_csv(csv_path)
