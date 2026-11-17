@@ -1,34 +1,53 @@
-import pypdf
-import re
-import os
+from pathlib import Path
 import pandas as pd
+import streamlit as st
 
-files_meta = [
-    ("2015에버리지랭킹.pdf", 2015, "auto"),
-    ("에버리지 남자.pdf", 2016, "남자"),
-    ("에버리지 여자.pdf", 2016, "여자"),
-    ("에버리지 남자 (1).pdf", 2017, "남자"),
-    ("에버리지 여자 (1).pdf", 2017, "여자"),
-    ("에버리지 남자 (2).pdf", 2018, "남자"),
-    ("에버리지 여자 (2).pdf", 2018, "여자"),
-    ("에버리지 남자 (3).pdf", 2019, "남자"),
-    ("에버리지 여자 (3).pdf", 2019, "여자"),
-    ("[KPBA-2021] 에버리지 남자_211216.pdf", 2021, "남자"),
-    ("[KPBA-2021] 에버리지 여자_211216.pdf", 2021, "여자"),
-    ("KPBA 2022 에버리지 남자랭킹 221216.pdf", 2022, "남자"),
-    ("KPBA 2022 에버리지 여자랭킹 221216.pdf", 2022, "여자"),
-    ("KPBA 에버리지 랭킹 남자 240118.pdf", 2023, "남자"),
-    ("KPBA 에버리지 랭킹 여자 240118.pdf", 2023, "여자"),
-    ("KPBA 에버리지 랭킹 남자 241213.pdf", 2024, "남자"),
-    ("KPBA 에버리지 랭킹 여자 241203.pdf", 2024, "여자"),
-    ("KPBA 에버리지 랭킹 남자 260106.pdf", 2025, "남자"),
-    ("KPBA 에버리지 랭킹 여자 251121.pdf", 2025, "여자"),
-]
+st.set_page_config(page_title="볼링 에버리지 분석", layout="wide")
 
-# Inspect the structure of lines in a few files to see how pypdf extracts rows
-for fname in ["2015에버리지랭킹.pdf", "에버리지 남자.pdf", "[KPBA-2021] 에버리지 남자_211216.pdf", "KPBA 2022 에버리지 남자랭킹 221216.pdf", "KPBA 에버리지 랭킹 남자 241213.pdf"]:
-    reader = pypdf.PdfReader(fname)
-    print(f"=== {fname} (pages: {len(reader.pages)}) ===")
-    for p_idx, page in enumerate(reader.pages):
-        lines = page.extract_text().split('\n')
-        print(f"  Page {p_idx+1}: {len(lines)} lines | sample: {lines[:4]}")
+
+def load_csv_safely(file_source):
+  """여러 인코딩을 순차적으로 시도해 CSV를 안전하게 불러옵니다."""
+  encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr"]
+  last_error = None
+
+  for enc in encodings:
+    try:
+      if hasattr(file_source, "seek"):
+        file_source.seek(0)
+      df = pd.read_csv(file_source, encoding=enc)
+      if not df.empty:
+        return df, None
+    except Exception as e:
+      last_error = e
+
+  return None, last_error
+
+
+# 현재 .py 파일이 있는 폴더를 기준으로 data/bowling_avg.csv 경로 설정
+BASE_DIR = Path(__file__).resolve().parent
+CSV_PATH = BASE_DIR / "data" / "bowling_avg.csv"
+
+st.title("🎳 볼링 에버리지 분석")
+
+df = None
+error_detail = None
+
+if CSV_PATH.exists():
+  df, error_detail = load_csv_safely(CSV_PATH)
+else:
+  error_detail = f"해당 경로에 파일이 없습니다 -> {CSV_PATH}"
+
+# 기본 경로에서 읽지 못한 경우 구체적 원인 안내 및 직접 업로드 지원
+if df is None:
+  st.error(f"파일을 읽을 수 없습니다. 원인: {error_detail}")
+  uploaded_file = st.file_uploader(
+      "bowling_avg.csv 파일을 직접 업로드해 보세요", type=["csv"]
+  )
+  if uploaded_file is not None:
+    df, error_detail = load_csv_safely(uploaded_file)
+    if df is None:
+      st.error(f"업로드한 파일도 읽을 수 없습니다: {error_detail}")
+
+if df is not None:
+  st.success(f"데이터 로드 성공 ({len(df)}행 × {len(df.columns)}열)")
+  st.dataframe(df, use_container_width=True)
