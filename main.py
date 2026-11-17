@@ -127,4 +127,228 @@ def load_csv_from_upload(uploaded_file):
                 raw_df = pd.read_csv(uploaded_file, encoding=enc, sep=sep)
                 if len(raw_df.columns) == 1 and any(s in str(raw_df.columns[0]) for s in [",", "\t", ";"]):
                     continue
-                if not
+                if not raw_df.empty:
+                    return prepare_dataframe(raw_df), None
+            except Exception as e:
+                last_error = e
+    return None, last_error
+
+
+def find_col(columns, keywords, exclude=None):
+    exclude = exclude or []
+    for kw in keywords:
+        for col in columns:
+            if col in exclude:
+                continue
+            if kw in col.lower():
+                return col
+    candidates = [c for c in columns if c not in exclude]
+    return candidates[0] if candidates else None
+
+
+# 1. 저장소의 bowling_avg.csv 파일 탐색
+BASE_DIR = Path(__file__).resolve().parent
+CANDIDATE_PATHS = [
+    BASE_DIR / "data" / "bowling_avg.csv",
+    BASE_DIR / "bowling_avg.csv",
+    Path("data/bowling_avg.csv"),
+    Path("bowling_avg.csv"),
+]
+
+df = None
+loaded_source = None
+file_error = None
+
+for path in CANDIDATE_PATHS:
+    if path.exists():
+        df, file_error = load_csv_from_path(path)
+        if df is not None:
+            loaded_source = str(path)
+            break
+
+# 2. 상단 타이틀 및 파일 업로드
+st.title("🎳 볼링 에버리지 분석 (2015년 이후)")
+
+with st.expander("📂 CSV 파일 불러오기 / 교체하기", expanded=(df is None)):
+    uploaded_file = st.file_uploader(
+        "bowling_avg.csv 파일을 업로드하면 팀명·선수이름을 제외하고 2015년부터 분석합니다.",
+        type=["csv", "txt"],
+    )
+    if uploaded_file is not None:
+        up_df, up_err = load_csv_from_upload(uploaded_file)
+        if up_df is not None:
+            df = up_df
+            loaded_source = f"업로드 파일: {uploaded_file.name}"
+        else:
+            st.error(f"파일을 읽지 못했습니다: {up_err}")
+
+if df is None:
+    st.warning(
+        "`data/bowling_avg.csv` 파일을 찾을 수 없습니다. "
+        "GitHub 저장소의 `data/bowling_avg.csv` 경로에 파일을 올리거나 위에서 직접 업로드해 주세요."
+    )
+    if file_error:
+        st.caption(f"상세 메시지: {file_error}")
+    st.stop()
+
+st.caption(f"데이터 출처: `{loaded_source}` (팀명·선수이름 자동 제외 적용됨)")
+
+# 3. 2015년 이후 데이터 필터링 및 사이드바 설정
+num_cols = list(df.select_dtypes(include="number").columns)
+metric_candidates = [c for c in num_cols if c != "연도"]
+
+if not metric_candidates:
+    st.error("분석할 에버리지 또는 점수 숫자 컬럼을 찾지 못했습니다.")
+    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.stop()
+
+with st.sidebar:
+    st.header("⚙️ 조회 설정")
+
+    default_metric = find_col(
+        metric_candidates,
+        ["에버", "avg", "average", "평균", "점수", "score", "총점"],
+    )
+    metric_col = st.selectbox(
+        "분석할 에버리지/점수 컬럼",
+        options=metric_candidates,
+        index=metric_candidates.index(default_metric),
+    )
+
+    filtered_df = df.copy()
+
+    # 2015년 이후 데이터 범위 고정 및 연도 슬라이더
+    if "연도" in filtered_df.columns and filtered_df["연도"].notna().any():
+        filtered_df = filtered_df[filtered_df["연도"] >= 2015].copy()
+
+        if filtered_df.empty:
+            st.warning("파일에 2015년 이후 데이터가 없습니다.")
+            st.stop()
+
+        min_year = int(filtered_df["연도"].min())
+        max_year = int(filtered_df["연도"].max())
+
+        if min_year < max_year:
+            year_range = st.slider(
+                "조회 연도 범위 (2015년~)",
+                min_value=min_year,
+                max_value=max_year,
+                value=(min_year, max_year),
+            )
+            filtered_df = filtered_df[
+                (filtered_df["연도"] >= year_range[0])
+                & (filtered_df["연도"] <= year_range[1])
+            ]
+        else:
+            st.info(f"조회 연도: {min_year}년")
+    else:
+        st.warning("CSV 파일에서 '연도' 컬럼을 찾지 못해 전체 기간 데이터를 표시합니다.")
+
+    # 기수·부문 등 남아있는 범주형 컬럼이 있으면 추가 필터 제공
+    cat_cols = [
+        c for c in filtered_df.columns
+        if c not in num_cols and 1 < filtered_df[c].nunique() <= 50
+    ]
+    for c_col in cat_cols[:2]:
+        opts = sorted([x for x in filtered_df[c_col].dropna().unique().tolist() if str(x) != ""])
+        if opts:
+            sel = st.multiselect(f"{c_col} 필터", options=opts, default=opts)
+            filtered_df = filtered_df[filtered_df[c_col].isin(sel)]
+
+if filtered_df.empty:
+    st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
+    st.stop()
+
+valid_scores = filtered_df[metric_col].dropna()
+if valid_scores.empty:
+    st.warning(f"'{metric_col}' 컬럼에 유효한 숫자 값이 없습니다.")
+    st.stop()
+
+# 4. 핵심 요약 지표 (KPI)
+avg_val = valid_scores.mean()
+max_val = valid_scores.max()
+min_val = valid_scores.min()
+
+if "연도" in filtered_df.columns and filtered_df["연도"].notna().any():
+    y_start = int(filtered_df["연도"].min())
+    y_end = int(filtered_df["연도"].max())
+    period_label = f"{y_start}년 ~ {y_end}년" if y_start != y_end else f"{y_start}년"
+    max_year_val = filtered_df.loc[valid_scores.idxmax(), "연도"]
+    max_delta = f"{max_year_val}년 기록"
+else:
+    period_label = "전체 기간"
+    max_delta = None
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("조회 기간", period_label, delta=f"총 {len(filtered_df):,}건")
+k2.metric(f"평균 ({metric_col})", f"{avg_val:.2f}")
+k3.metric("최고 기록", f"{max_val:.2f}", delta=max_delta)
+k4.metric("최저 기록", f"{min_val:.2f}")
+
+st.divider()
+
+# 5. 분석 탭 구성
+tab1, tab2, tab3 = st.tabs(["📈 연도별 에버리지 추이", "📊 항목별 비교", "📋 데이터 표 & 다운로드"])
+
+with tab1:
+    if "연도" in filtered_df.columns and filtered_df["연도"].notna().any():
+        yearly_df = (
+            filtered_df.groupby("연도", as_index=False)[metric_col]
+            .agg(평균="mean", 최고="max", 최저="min", 데이터수="count")
+            .sort_values(by="연도", ascending=True)
+        )
+        yearly_df["평균"] = yearly_df["평균"].round(2)
+        yearly_df["최고"] = yearly_df["최고"].round(2)
+        yearly_df["최저"] = yearly_df["최저"].round(2)
+        yearly_df["연도_표시"] = yearly_df["연도"].astype(str) + "년"
+
+        col_chart, col_table = st.columns([3, 2])
+        with col_chart:
+            st.subheader(f"연도별 {metric_col} 추이 (2015년~)")
+            chart_df = yearly_df.set_index("연도_표시")[["평균", "최고"]]
+            st.line_chart(chart_df, use_container_width=True)
+
+        with col_table:
+            st.subheader("연도별 요약표")
+            display_yearly = yearly_df[["연도_표시", "평균", "최고", "최저", "데이터수"]].rename(
+                columns={"연도_표시": "연도"}
+            )
+            st.dataframe(display_yearly, hide_index=True, use_container_width=True)
+    else:
+        st.subheader(f"{metric_col} 분포")
+        st.bar_chart(filtered_df[metric_col].reset_index(drop=True), use_container_width=True)
+
+with tab2:
+    if len(metric_candidates) >= 2:
+        st.subheader("연도별 세부 수치 비교")
+        selected_cols = st.multiselect(
+            "비교할 항목 선택",
+            options=metric_candidates,
+            default=metric_candidates[: min(3, len(metric_candidates))],
+        )
+        if selected_cols and "연도" in filtered_df.columns:
+            comp_df = (
+                filtered_df.groupby("연도")[selected_cols]
+                .mean()
+                .sort_index()
+            )
+            comp_df.index = comp_df.index.astype(str) + "년"
+            st.bar_chart(comp_df, use_container_width=True)
+    else:
+        st.info("비교할 수 있는 추가 숫자 컬럼이 없습니다.")
+
+with tab3:
+    st.subheader("필터링된 데이터 (팀명·선수이름 제외, 2015년 이후)")
+    display_df = filtered_df.copy()
+    if "연도" in display_df.columns:
+        display_df = display_df.sort_values(by="연도", ascending=False)
+
+    st.dataframe(display_df, hide_index=True, use_container_width=True)
+
+    csv_bytes = display_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="📥 정제된 CSV 다운로드 (2015년~)",
+        data=csv_bytes,
+        file_name="bowling_avg_2015_onwards.csv",
+        mime="text/csv",
+    )
