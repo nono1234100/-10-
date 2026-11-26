@@ -1,8 +1,10 @@
 import math
+import re
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pypdf import PdfReader
 
 st.set_page_config(page_title="KPBA 볼링 에버리지 추이 분석", page_icon="🎳", layout="wide")
 
@@ -10,23 +12,63 @@ EXCLUDE_KEYWORDS = ["선수", "이름", "성명", "회원", "name", "player", "�
 YEAR_KEYWORDS = ["year", "연도", "년도", "시즌", "season", "날짜", "date"]
 
 
-def clean_data(raw_df: pd.DataFrame) -> pd.DataFrame:
+def parse_single_pdf(file_source, filename: str) -> list[dict]:
+    records = []
+    gender = "여자" if "여자" in filename else ("남자" if "남자" in filename else "기타")
+    reader = PdfReader(file_source)
+    full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    year_match = re.search(r"(202\d)년", full_text)
+    if year_match:
+        year = int(year_match.group(1))
+    else:
+        code_match = re.search(r"(\d{2})1105", filename)
+        year = int(f"20{int(code_match.group(1)) - 1}") if code_match else None
+
+    if not year:
+        return records
+
+    for line in full_text.splitlines():
+        line = line.strip()
+        match = re.match(r"^(\d+)\s+([가-힣a-zA-Z0-9\s]+?)\s+(F?\d+)\s+(.*)$", line)
+        if match:
+            rest_tokens = match.group(4).split()
+            if len(rest_tokens) >= 4:
+                try:
+                    tournaments = int(rest_tokens[-4])
+                    games = int(rest_tokens[-3])
+                    total_pins = int(rest_tokens[-2])
+                    avg = float(rest_tokens[-1])
+
+                    if 100.0 <= avg <= 300.0 and tournaments > 0:
+                        records.append({
+                            "year": year,
+                            "성별": gender,
+                            "참가대회수": tournaments,
+                            "총게임수": games,
+                            "총핀": total_pins,
+                            "에버리지": avg,
+                        })
+                except ValueError:
+                    continue
+    return records
+
+
+def clean_csv_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = raw_df.dropna(how="all").dropna(axis=1, how="all").copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    # 1. 개인정보(선수, 이름, 성명, 회원, 팀, 소속, 구단 등) 컬럼 자동 삭제
+    # 개인정보(선수, 이름, 성명, 회원, 팀, 소속, 구단 등) 컬럼 자동 삭제
     drop_cols = [c for c in df.columns if any(k in c.lower() for k in EXCLUDE_KEYWORDS)]
     if drop_cols:
         df = df.drop(columns=drop_cols)
 
-    # 2. 숫자형 데이터 정제 (천 단위 쉼표 제거)
     for col in df.columns:
         if df[col].dtype == "object":
             s = df[col].astype(str).str.strip().str.replace(",", "", regex=False)
             num = pd.to_numeric(s, errors="coerce")
             df[col] = num if num.notna().mean() >= 0.6 else s
 
-    # 3. 연도 컬럼 표준화 (year)
     y_col = next((c for c in df.columns if any(k in c.lower() for k in YEAR_KEYWORDS)), None)
     if y_col:
         extracted = df[y_col].astype(str).str.extract(r"(20\d{2}|19\d{2})", expand=False)
@@ -44,7 +86,7 @@ def load_csv(source):
                 source.seek(0)
             df = pd.read_csv(source, encoding=enc)
             if not df.empty:
-                return clean_data(df)
+                return clean_csv_data(df)
         except Exception:
             continue
     return None
@@ -53,17 +95,41 @@ def load_csv(source):
 st.title("🎳 KPBA 프로볼링 에버리지 추이 분석")
 st.caption("개인정보(선수명·팀명) 비식별화 처리 | 대회 70% 이상 참가 선수 기준")
 
-base_dir = Path(__file__).resolve().parent
-csv_paths = [base_dir / "data" / "bowling_avg.csv", Path("data/bowling_avg.csv"), Path("bowling_avg.csv")]
+# 1. 웹 화면에서 PDF(여러 개 가능) 또는 CSV 직접 업로드 받기
+uploaded_files = st.file_uploader(
+    "📂 22개 PDF 파일(또는 CSV 파일)을 한꺼번에 드래그해서 올려주세요",
+    type=["pdf", "csv"],
+    accept_multiple_files=True,
+)
 
-df = next((load_csv(p) for p in csv_paths if p.exists()), None)
+df = None
 
-uploaded = st.file_uploader("CSV 파일 직접 업로드 (data/bowling_avg.csv가 없을 때 사용)", type=["csv"])
-if uploaded is not None:
-    df = load_csv(uploaded)
+if uploaded_files:
+    pdf_records = []
+    for f in uploaded_files:
+        if f.name.lower().endswith(".pdf"):
+            pdf_records.extend(parse_single_pdf(f, f.name))
+        elif f.name.lower().endswith(".csv"):
+            df = load_csv(f)
+    if pdf_records:
+        df = pd.DataFrame(pdf_records)
+else:
+    # 업로드가 없으면 GitHub data 폴더 내 PDF 또는 CSV 자동 탐색
+    base_dir = Path(__file__).resolve().parent
+    pdf_files = list(base_dir.rglob("*.pdf"))
+    if pdf_files:
+        pdf_records = []
+        for p in pdf_files:
+            pdf_records.extend(parse_single_pdf(p, p.name))
+        if pdf_records:
+            df = pd.DataFrame(pdf_records)
 
-if df is None:
-    st.warning("`data/bowling_avg.csv` 파일을 찾을 수 없습니다. GitHub의 `data/bowling_avg.csv` 경로에 파일을 올리거나 위에서 직접 업로드해 주세요.")
+    if df is None or df.empty:
+        csv_paths = [base_dir / "data" / "bowling_avg.csv", Path("data/bowling_avg.csv"), Path("bowling_avg.csv")]
+        df = next((load_csv(p) for p in csv_paths if p.exists()), None)
+
+if df is None or df.empty:
+    st.info("👆 위 `Browse files` 버튼을 누르거나, 가지고 계신 **22개의 PDF 파일을 마우스로 한꺼번에 드래그해서 위 상자에 놓아주세요!**")
     st.stop()
 
 # 연도 정수 변환
@@ -98,7 +164,7 @@ if df.empty:
     st.error("필터 조건을 만족하는 유효한 데이터가 없습니다.")
     st.stop()
 
-# 1. 연도별 전체 통계 집계
+# 연도별 전체 통계 집계
 yearly = (
     df.groupby("year", as_index=False)[avg_col]
     .agg(전체평균="mean", 중앙값="median", 최고="max", 최저="min", 인원수="count")
@@ -129,7 +195,7 @@ c4.metric("예측 오차 (MAE)", f"{mae_model:.2f}점", f"기준모델 대비 {m
 
 st.divider()
 
-# 2. 모든 선수의 연도별 평균 에버리지 추이 및 요약표
+# 상단: 모든 선수의 연도별 평균 에버리지 추이
 col1, col2 = st.columns([3, 2])
 with col1:
     st.subheader("📈 모든 선수의 연도별 평균 에버리지 추이")
@@ -142,12 +208,8 @@ with col2:
 
 st.divider()
 
-# 3. 연도별 개별 선수들의 에버리지 분포 (비식별화)
+# 하단: 연도별 선수들의 에버리지 분포
 st.subheader("🎯 연도별 선수들의 에버리지 분포 (비식별화)")
-scatter_df = df[["year", avg_col]].copy()
-scatter_df["연도"] = scatter_df["year"].astype(str) + "년"
-scatter_df = scatter_df.rename(columns={avg_col: "에버리지"})
-
 if gender_col:
     st.scatter_chart(
         data=df.assign(연도=df["year"].astype(str) + "년").rename(columns={avg_col: "에버리지", gender_col: "성별"}),
@@ -156,9 +218,13 @@ if gender_col:
         color="성별",
     )
 else:
-    st.scatter_chart(data=scatter_df, x="연도", y="에버리지")
+    st.scatter_chart(
+        data=df.assign(연도=df["year"].astype(str) + "년").rename(columns={avg_col: "에버리지"}),
+        x="연도",
+        y="에버리지",
+    )
 
-# 4. 비식별화 데이터 미리보기 및 다운로드
+# 비식별화 데이터 미리보기 및 다운로드
 with st.expander("📋 비식별화 데이터 미리보기 및 CSV 다운로드"):
     st.dataframe(df.sort_values(["year", avg_col], ascending=[True, False]), hide_index=True, use_container_width=True)
     st.download_button(
