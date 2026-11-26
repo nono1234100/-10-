@@ -43,7 +43,7 @@ def load_all_pdfs() -> pd.DataFrame:
                         total_pins = int(rest_tokens[-2])
                         avg = float(rest_tokens[-1])
 
-                        # 개인정보(선수명·등록번호·팀명)는 처음부터 제외하고 수치 데이터만 추출
+                        # 개인정보(선수명·등록번호·팀명)는 제외하고 수치 데이터만 추출
                         if 100.0 <= avg <= 300.0 and tournaments > 0:
                             records.append({
                                 "year": year,
