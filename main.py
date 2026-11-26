@@ -1,9 +1,10 @@
+import math
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="KPBA 볼링 에버리지 추이 분석 (2015~)", page_icon="🎳", layout="wide")
+st.set_page_config(page_title="KPBA 볼링 에버리지 추이 분석", page_icon="🎳", layout="wide")
 
 EXCLUDE_KEYWORDS = ["선수", "이름", "성명", "회원", "name", "player", "팀", "소속", "구단", "team", "club"]
 YEAR_KEYWORDS = ["year", "연도", "년도", "시즌", "season", "날짜", "date"]
@@ -13,7 +14,7 @@ def clean_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = raw_df.dropna(how="all").dropna(axis=1, how="all").copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    # 1. 개인정보(선수이름, 팀명/소속) 컬럼 자동 삭제
+    # 1. 개인정보(선수, 이름, 성명, 회원, 팀, 소속, 구단 등) 컬럼 자동 삭제
     drop_cols = [c for c in df.columns if any(k in c.lower() for k in EXCLUDE_KEYWORDS)]
     if drop_cols:
         df = df.drop(columns=drop_cols)
@@ -49,8 +50,8 @@ def load_csv(source):
     return None
 
 
-st.title("🎳 KPBA 프로볼링 에버리지 추이 분석 (2015~)")
-st.caption("개인정보 보호를 위해 선수 이름과 팀명은 자동으로 제거되며, 2015년 이후 기록만 분석합니다.")
+st.title("🎳 KPBA 프로볼링 에버리지 추이 분석")
+st.caption("개인정보(선수명·팀명) 비식별화 처리 | 대회 70% 이상 참가 선수 기준")
 
 base_dir = Path(__file__).resolve().parent
 csv_paths = [base_dir / "data" / "bowling_avg.csv", Path("data/bowling_avg.csv"), Path("bowling_avg.csv")]
@@ -65,37 +66,48 @@ if df is None:
     st.warning("`data/bowling_avg.csv` 파일을 찾을 수 없습니다. GitHub의 `data/bowling_avg.csv` 경로에 파일을 올리거나 위에서 직접 업로드해 주세요.")
     st.stop()
 
-# 2015년 이후 데이터 필터링
+# 연도 정수 변환
 if "year" in df.columns and df["year"].notna().any():
-    df = df[df["year"] >= 2015].copy()
+    df = df[df["year"].notna()].copy()
     df["year"] = df["year"].astype(int)
-
-if df.empty:
-    st.error("2015년 이후 유효한 데이터가 없습니다.")
-    st.stop()
 
 # 에버리지 컬럼 찾기
 num_cols = [c for c in df.select_dtypes(include="number").columns if c != "year"]
 avg_col = next((c for c in num_cols if any(k in c.lower() for k in ["avg", "에버", "평균"])), num_cols[0])
 
-# 성별 필터 (gender 컬럼이 있는 경우)
+# 성별 컬럼 찾기
 gender_col = next((c for c in df.columns if any(k in c.lower() for k in ["gender", "성별"])), None)
+
+# 참가대회수 컬럼 찾기 및 '70% 이상 참가' 필터 적용
+tourney_col = next((c for c in num_cols if any(k in c.lower() for k in ["대회", "참가", "tourney", "count"])), None)
+if tourney_col:
+    group_keys = ["year", gender_col] if gender_col else ["year"]
+    max_t = df.groupby(group_keys)[tourney_col].transform("max")
+    min_req = (max_t * 0.7).apply(math.ceil)
+    df = df[df[tourney_col] >= min_req].copy()
+    st.sidebar.success("✅ 대회 70% 이상 참가자 필터 적용됨")
+
+# 사이드바: 성별 필터
 if gender_col:
     genders = ["전체"] + sorted(df[gender_col].dropna().unique().tolist())
     sel_gender = st.sidebar.radio("성별 구분", genders)
     if sel_gender != "전체":
         df = df[df[gender_col] == sel_gender]
 
-# 연도별 통계 집계
+if df.empty:
+    st.error("필터 조건을 만족하는 유효한 데이터가 없습니다.")
+    st.stop()
+
+# 1. 연도별 전체 통계 집계
 yearly = (
     df.groupby("year", as_index=False)[avg_col]
-    .agg(평균="mean", 최고="max", 최저="min", 표본수="count")
+    .agg(전체평균="mean", 중앙값="median", 최고="max", 최저="min", 인원수="count")
     .sort_values("year")
 )
 
-# 선형 회귀 분석 및 기준 모델(Baseline) 비교
+# 선형 회귀 분석
 x = yearly["year"].to_numpy(dtype=float)
-y = yearly["평균"].to_numpy(dtype=float)
+y = yearly["전체평균"].to_numpy(dtype=float)
 
 if len(x) >= 2:
     slope, intercept = np.polyfit(x, y, 1)
@@ -115,24 +127,43 @@ c2.metric("연평균 변화량 (기울기)", f"{slope:+.3f} 점/년")
 c3.metric("회귀 모델 설명력 (R²)", f"{r2:.3f}")
 c4.metric("예측 오차 (MAE)", f"{mae_model:.2f}점", f"기준모델 대비 {mae_model - mae_baseline:+.2f}점")
 
-# 추이 그래프 및 요약표
+st.divider()
+
+# 2. 모든 선수의 연도별 평균 에버리지 추이 및 요약표
 col1, col2 = st.columns([3, 2])
 with col1:
-    st.subheader("📈 연도별 평균 에버리지 변화 추이")
-    chart_df = yearly.assign(연도=yearly["year"].astype(str) + "년").set_index("연도")[["평균", "최고"]]
+    st.subheader("📈 모든 선수의 연도별 평균 에버리지 추이")
+    chart_df = yearly.assign(연도=yearly["year"].astype(str) + "년").set_index("연도")[["전체평균", "최고", "최저"]]
     st.line_chart(chart_df)
 
 with col2:
     st.subheader("📊 연도별 요약 통계")
     st.dataframe(yearly.round(2), hide_index=True, use_container_width=True)
 
-# 비식별화 데이터 조회 및 다운로드
+st.divider()
+
+# 3. 연도별 개별 선수들의 에버리지 분포 (비식별화)
+st.subheader("🎯 연도별 선수들의 에버리지 분포 (비식별화)")
+scatter_df = df[["year", avg_col]].copy()
+scatter_df["연도"] = scatter_df["year"].astype(str) + "년"
+scatter_df = scatter_df.rename(columns={avg_col: "에버리지"})
+
+if gender_col:
+    st.scatter_chart(
+        data=df.assign(연도=df["year"].astype(str) + "년").rename(columns={avg_col: "에버리지", gender_col: "성별"}),
+        x="연도",
+        y="에버리지",
+        color="성별",
+    )
+else:
+    st.scatter_chart(data=scatter_df, x="연도", y="에버리지")
+
+# 4. 비식별화 데이터 미리보기 및 다운로드
 with st.expander("📋 비식별화 데이터 미리보기 및 CSV 다운로드"):
-    st.dataframe(df.sort_values("year"), hide_index=True, use_container_width=True)
+    st.dataframe(df.sort_values(["year", avg_col], ascending=[True, False]), hide_index=True, use_container_width=True)
     st.download_button(
-        "📥 정제된 CSV 다운로드 (이름·팀명 제외)",
+        "📥 정제된 CSV 다운로드 (개인정보 제외)",
         data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="bowling_avg_2015_clean.csv",
+        file_name="bowling_avg_filtered_clean.csv",
         mime="text/csv",
     )
-# END OF CODE
