@@ -21,30 +21,46 @@ def load_all_pdfs() -> pd.DataFrame:
         reader = PdfReader(p)
         full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
 
-        year_match = re.search(r"(202\d)년", full_text)
+        # 1. 본문에서 2010~2029년 연도 추출
+        year_match = re.search(r"(20[12]\d)\s*년", full_text)
         if year_match:
             year = int(year_match.group(1))
         else:
-            code_match = re.search(r"(\d{2})1105", filename)
-            year = int(f"20{int(code_match.group(1)) - 1}") if code_match else None
+            # 2. 파일명에서 연도 추출 (예: 2015, 151105 등)
+            full_year_match = re.search(r"(20[12]\d)", filename)
+            if full_year_match:
+                year = int(full_year_match.group(1))
+            else:
+                code_match = re.search(r"(\d{2})1105", filename)
+                if code_match:
+                    yy = int(code_match.group(1))
+                    # 231105 -> 2022년, 261105 -> 2026년 등 보정
+                    year = 2000 + yy if yy >= 26 else 2000 + yy - 1
+                else:
+                    year = None
 
         if not year:
             continue
 
+        # 3. 모든 연도 양식을 포괄하는 유연한 데이터 추출
         for line in full_text.splitlines():
             line = line.strip()
-            match = re.match(r"^(\d+)\s+([가-힣a-zA-Z0-9\s]+?)\s+(F?\d+)\s+(.*)$", line)
-            if match:
-                rest_tokens = match.group(4).split()
-                if len(rest_tokens) >= 4:
-                    try:
-                        tournaments = int(rest_tokens[-4])
-                        games = int(rest_tokens[-3])
-                        total_pins = int(rest_tokens[-2])
-                        avg = float(rest_tokens[-1])
+            # 순위(숫자)로 시작하고 끝에 숫자 4개(대회수, 게임수, 총핀, 에버리지)가 오는 모든 줄 인식
+            if not re.match(r"^\d+\s+", line):
+                continue
 
-                        # 개인정보(선수명·등록번호·팀명)는 제외하고 수치 데이터만 추출
-                        if 100.0 <= avg <= 300.0 and tournaments > 0:
+            tokens = line.split()
+            if len(tokens) >= 6:
+                try:
+                    tournaments = int(tokens[-4].replace(",", ""))
+                    games = int(tokens[-3].replace(",", ""))
+                    total_pins = int(tokens[-2].replace(",", ""))
+                    avg = float(tokens[-1].replace(",", ""))
+
+                    # 유효성 검증: 에버리지 100~300, 총핀/게임수 계산 일치 여부 확인
+                    if 100.0 <= avg <= 300.0 and tournaments > 0 and games > 0:
+                        calc_avg = total_pins / games
+                        if abs(calc_avg - avg) <= 0.1:
                             records.append({
                                 "year": year,
                                 "성별": gender,
@@ -53,10 +69,14 @@ def load_all_pdfs() -> pd.DataFrame:
                                 "총핀": total_pins,
                                 "에버리지": avg,
                             })
-                    except ValueError:
-                        continue
+                except ValueError:
+                    continue
 
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    if not df.empty:
+        # 동일 연도/성별/총핀/게임수 중복 제거
+        df = df.drop_duplicates(subset=["year", "성별", "총게임수", "총핀"])
+    return df
 
 
 st.title("🎳 KPBA 프로볼링 에버리지 추이 분석")
