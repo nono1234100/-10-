@@ -1,6 +1,7 @@
 import math
 import re
 from pathlib import Path
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -17,16 +18,24 @@ def load_all_pdfs() -> pd.DataFrame:
 
     for p in pdf_files:
         filename = p.name
-        gender = "여자" if "여자" in filename else ("남자" if "남자" in filename else "기타")
         reader = PdfReader(p)
         full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+        # 파일명 또는 본문 첫 페이지에서 성별 판별 ('기타' 방지)
+        header_text = filename + " " + (reader.pages[0].extract_text() or "")[:300]
+        if "여자" in header_text:
+            gender = "여자"
+        elif "남자" in header_text:
+            gender = "남자"
+        else:
+            gender = "기타"
 
         # 1. 본문에서 2010~2029년 연도 추출
         year_match = re.search(r"(20[12]\d)\s*년", full_text)
         if year_match:
             year = int(year_match.group(1))
         else:
-            # 2. 파일명에서 연도 추출 (예: 2015, 151105 등)
+            # 2. 파일명에서 연도 추출
             full_year_match = re.search(r"(20[12]\d)", filename)
             if full_year_match:
                 year = int(full_year_match.group(1))
@@ -34,7 +43,6 @@ def load_all_pdfs() -> pd.DataFrame:
                 code_match = re.search(r"(\d{2})1105", filename)
                 if code_match:
                     yy = int(code_match.group(1))
-                    # 231105 -> 2022년, 261105 -> 2026년 등 보정
                     year = 2000 + yy if yy >= 26 else 2000 + yy - 1
                 else:
                     year = None
@@ -45,7 +53,6 @@ def load_all_pdfs() -> pd.DataFrame:
         # 3. 모든 연도 양식을 포괄하는 유연한 데이터 추출
         for line in full_text.splitlines():
             line = line.strip()
-            # 순위(숫자)로 시작하고 끝에 숫자 4개(대회수, 게임수, 총핀, 에버리지)가 오는 모든 줄 인식
             if not re.match(r"^\d+\s+", line):
                 continue
 
@@ -57,7 +64,6 @@ def load_all_pdfs() -> pd.DataFrame:
                     total_pins = int(tokens[-2].replace(",", ""))
                     avg = float(tokens[-1].replace(",", ""))
 
-                    # 유효성 검증: 에버리지 100~300, 총핀/게임수 계산 일치 여부 확인
                     if 100.0 <= avg <= 300.0 and tournaments > 0 and games > 0:
                         calc_avg = total_pins / games
                         if abs(calc_avg - avg) <= 0.1:
@@ -74,7 +80,6 @@ def load_all_pdfs() -> pd.DataFrame:
 
     df = pd.DataFrame(records)
     if not df.empty:
-        # 동일 연도/성별/총핀/게임수 중복 제거
         df = df.drop_duplicates(subset=["year", "성별", "총게임수", "총핀"])
     return df
 
@@ -94,8 +99,9 @@ min_req = (max_t * 0.7).apply(math.ceil)
 df = df[df["참가대회수"] >= min_req].copy()
 st.sidebar.success("✅ 대회 70% 이상 참가자 필터 적용됨")
 
-# 사이드바: 성별 필터
-genders = ["전체"] + sorted(df["성별"].dropna().unique().tolist())
+# 사이드바: 성별 필터 ('기타' 제외하고 표시)
+valid_genders = [g for g in sorted(df["성별"].dropna().unique().tolist()) if g != "기타"]
+genders = ["전체"] + valid_genders
 sel_gender = st.sidebar.radio("성별 구분", genders)
 if sel_gender != "전체":
     df = df[df["성별"] == sel_gender]
@@ -106,6 +112,8 @@ yearly = (
     .agg(전체평균="mean", 중앙값="median", 최고="max", 최저="min", 인원수="count")
     .sort_values("year")
 )
+yearly["연도"] = yearly["year"].astype(str) + "년"
+yearly["평균라벨"] = yearly["전체평균"].map(lambda v: f"{v:.2f}")
 
 # 선형 회귀 분석
 x = yearly["year"].to_numpy(dtype=float)
@@ -131,34 +139,24 @@ c4.metric("예측 오차 (MAE)", f"{mae_model:.2f}점", f"기준모델 대비 {m
 
 st.divider()
 
-# 상단: 모든 선수의 연도별 평균 에버리지 추이
+# 상단: Y축 확대 + 점수 라벨이 적용된 연도별 평균 에버리지 추이 그래프
 col1, col2 = st.columns([3, 2])
 with col1:
-    st.subheader("📈 모든 선수의 연도별 평균 에버리지 추이")
-    chart_df = yearly.assign(연도=yearly["year"].astype(str) + "년").set_index("연도")[["전체평균", "최고", "최저"]]
-    st.line_chart(chart_df)
+    st.subheader("📈 연도별 평균 에버리지 변화 추이 (확대 뷰)")
 
-with col2:
-    st.subheader("📊 연도별 요약 통계")
-    st.dataframe(yearly.round(2), hide_index=True, use_container_width=True)
+    y_min = math.floor(yearly["전체평균"].min() - 2)
+    y_max = math.ceil(yearly["전체평균"].max() + 2)
 
-st.divider()
-
-# 하단: 연도별 선수들의 에버리지 분포
-st.subheader("🎯 연도별 선수들의 에버리지 분포 (비식별화)")
-st.scatter_chart(
-    data=df.assign(연도=df["year"].astype(str) + "년"),
-    x="연도",
-    y="에버리지",
-    color="성별",
-)
-
-# 비식별화 데이터 미리보기 및 다운로드
-with st.expander("📋 비식별화 데이터 미리보기 및 CSV 다운로드"):
-    st.dataframe(df.sort_values(["year", "에버리지"], ascending=[True, False]), hide_index=True, use_container_width=True)
-    st.download_button(
-        "📥 정제된 CSV 다운로드 (개인정보 제외)",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="bowling_avg_filtered_clean.csv",
-        mime="text/csv",
+    base = alt.Chart(yearly).encode(
+        x=alt.X("연도:N", title="연도", axis=alt.Axis(labelAngle=0))
     )
+
+    line = base.mark_line(
+        color="#1f77b4",
+        strokeWidth=3,
+        point=alt.OverlayMarkDef(color="#1f77b4", size=90, filled=True)
+    ).encode(
+        y=alt.Y(
+            "전체평균:Q",
+            title="평균 에버리지",
+            scale=alt.Scale(domain=[y_min, y_max], zero=False
