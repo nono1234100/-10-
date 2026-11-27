@@ -21,7 +21,7 @@ def load_all_pdfs() -> pd.DataFrame:
         reader = PdfReader(p)
         full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
 
-        # 파일명 또는 본문 첫 페이지에서 성별 판별 ('기타' 방지)
+        # 파일명 또는 본문 첫 페이지에서 성별 판별
         header_text = filename + " " + (reader.pages[0].extract_text() or "")[:300]
         if "여자" in header_text:
             gender = "여자"
@@ -159,4 +159,54 @@ with col1:
         y=alt.Y(
             "전체평균:Q",
             title="평균 에버리지",
-            scale=alt.Scale(domain=[y_min, y_max], zero=False
+            scale=alt.Scale(domain=[y_min, y_max], zero=False)
+        ),
+        tooltip=[
+            alt.Tooltip("연도:N", title="연도"),
+            alt.Tooltip("전체평균:Q", title="전체 평균", format=".2f"),
+            alt.Tooltip("중앙값:Q", title="중앙값", format=".2f"),
+            alt.Tooltip("최고:Q", title="최고점", format=".2f"),
+            alt.Tooltip("최저:Q", title="최저점", format=".2f"),
+            alt.Tooltip("인원수:Q", title="대상 인원"),
+        ]
+    )
+
+    labels = base.mark_text(
+        align="center",
+        baseline="bottom",
+        dy=-12,
+        fontSize=12,
+        fontWeight="bold",
+        color="#111111"
+    ).encode(
+        y=alt.Y("전체평균:Q", scale=alt.Scale(domain=[y_min, y_max], zero=False)),
+        text="평균라벨:N"
+    )
+
+    st.altair_chart((line + labels).properties(height=400), use_container_width=True)
+
+with col2:
+    st.subheader("📊 연도별 요약 통계")
+    display_yearly = yearly[["year", "전체평균", "중앙값", "최고", "최저", "인원수"]].rename(columns={"year": "연도"})
+    st.dataframe(display_yearly.round(2), hide_index=True, use_container_width=True, height=400)
+
+st.divider()
+
+# 하단: 연도별 선수들의 에버리지 분포
+st.subheader("🎯 연도별 선수들의 에버리지 분포 (비식별화)")
+st.scatter_chart(
+    data=df.assign(연도=df["year"].astype(str) + "년"),
+    x="연도",
+    y="에버리지",
+    color="성별",
+)
+
+# 비식별화 데이터 미리보기 및 다운로드
+with st.expander("📋 비식별화 데이터 미리보기 및 CSV 다운로드"):
+    st.dataframe(df.sort_values(["year", "에버리지"], ascending=[True, False]), hide_index=True, use_container_width=True)
+    st.download_button(
+        "📥 정제된 CSV 다운로드 (개인정보 제외)",
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="bowling_avg_filtered_clean.csv",
+        mime="text/csv",
+    )
